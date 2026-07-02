@@ -69,6 +69,7 @@ Do not rely on `$?` after several commands; it only reflects the most recent pip
 ## Paths And Files
 
 - Use `Join-Path`, `Resolve-Path`, and `[System.IO.Path]` rather than manual string concatenation for Windows paths.
+- `New-Item` creates paths with `-Path`, not `-LiteralPath`; use `-Path` for creation, then use `-LiteralPath` for later reads, copies, moves, or deletes.
 - Before recursive delete or move, resolve the final target and verify it is inside the intended directory.
 - Use `Copy-Item`/`Move-Item`/`Remove-Item` with `-LiteralPath`; avoid `del`, `rd`, and `cmd /c` unless explicitly required.
 - If creating temporary files for scripts, use `$env:TEMP` or `[System.IO.Path]::GetTempPath()`.
