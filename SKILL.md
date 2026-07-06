@@ -39,8 +39,8 @@ python C:\Users\13849\.codex\skills\.system\skill-creator\scripts\quick_validate
 - Avoid PowerShell double-quoted strings around bash/ssh scripts containing `$var`, `$(...)`, backticks, or `\`.
 - Use single quotes for literal strings; use double quotes only when PowerShell interpolation is intended.
 - Never compose destructive file operations by enumerating in PowerShell and deleting in `cmd /c`, bash, or another shell.
-- Avoid variable names that collide with built-in variables. `$HOME` is read-only, and `$Matches` is an automatic variable used by `-match`; PowerShell variable names are case-insensitive, so `$home` and `$matches` collide too.
-- Do not pipe directly from a `foreach (...) { ... }` statement block. Collect results in an array or use pipeline-native `ForEach-Object` when the output needs to be piped.
+- Avoid variable names that collide with built-in variables. PowerShell variable names are case-insensitive, so `$home` collides with read-only `$HOME`, `$matches` collides with automatic `$Matches`, and `$Args` collides with automatic `$args`. Use names such as `$ArgList`, `$Rows`, or `$ResultItems` for function parameters and local collections.
+- Do not pipe directly from a `foreach (...) { ... }` statement block; it can fail with `An empty pipe element is not allowed.` Collect results in an array or use pipeline-native `ForEach-Object` when the output needs to be piped.
 
 Safe examples:
 
