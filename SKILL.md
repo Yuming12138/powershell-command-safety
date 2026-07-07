@@ -31,6 +31,8 @@ After editing this skill, run:
 python C:\Users\13849\.codex\skills\.system\skill-creator\scripts\quick_validate.py C:\Users\13849\.codex\skills\powershell-command-safety
 ```
 
+When updating this skill from GitHub, first verify whether the active skill directory is itself a Git checkout. If it is a plain installed copy, do not run `git pull` in that directory. Pull or clone the remote into a separate worktree, merge the rule changes there, validate, then sync the updated files back to the active skill path.
+
 ## Command Construction Rules
 
 - Prefer one shell at a time. If a task is pure PowerShell, use PowerShell cmdlets end to end.
@@ -100,6 +102,8 @@ $obj.value
 ```
 
 - When writing scripts that will run in WSL or Linux, strip CRLF or generate them inside WSL. CRLF symptoms include `sort\r: command not found`, broken heredoc terminators, and correct-looking paths reported as missing.
+- When patching files that live only inside WSL, do not pass Linux paths like `/home/...` to a Windows-side patcher; it may resolve them as `D:\home\...` or another invalid Windows path. Either use a Windows UNC path such as `\\wsl.localhost\Ubuntu-24.04\home\...` from Windows, or run the patch tool entirely inside WSL. Preserve the file's existing line endings when using ad hoc scripts so a one-line edit does not become a whole-file diff.
+- When a WSL repo intentionally stores a file with CRLF line endings, default `git diff --check` can report every added CRLF line as trailing whitespace. First confirm the file's stored/working line endings, then run the check with `git -c core.whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol diff --check` instead of normalizing the whole file just to satisfy the check.
 
 ## Native Commands
 
@@ -171,10 +175,27 @@ If a local bash script is itself fed on stdin, nested `ssh host ...` may consume
 ssh -n cmsg-root "df -h /"
 ```
 
-Do not use `ssh -n` when intentionally streaming a file:
+If a remote script itself contains quoted heredocs or Python snippets, avoid embedding it inside a double-quoted `ssh "sudo bash -lc '...'"` command. Create the remote script as literal text in WSL and pass values as `bash -s --` arguments so neither PowerShell nor the intermediate shell strips quotes:
+
+```powershell
+@'
+set -euo pipefail
+cat > /tmp/remote.sh <<'REMOTE'
+set -euo pipefail
+python3 - "$1" <<'PY'
+import sys
+print(sys.argv[1])
+PY
+REMOTE
+ssh host 'sudo -n bash -s -- arg-value' < /tmp/remote.sh
+'@ | wsl -d Ubuntu-24.04 -- bash -lc "tr -d '\r' > /tmp/task.sh && bash /tmp/task.sh"
+```
+
+Do not use `ssh -n` when intentionally streaming stdin to the remote side, including heredoc-fed scripts and file uploads:
 
 ```bash
 ssh cmsg-root "cat > /tmp/artifact.bin" < artifact.bin
+ssh cmsg-root 'sudo -n bash -s -- arg' < /tmp/remote.sh
 ```
 
 ## Transfers
@@ -190,7 +211,8 @@ For large files over unstable SSH, prefer resumable or chunked approaches:
 - Read current state first: compose file, running mounts, current release path, health status.
 - Back up config before patching.
 - Preserve file-vs-directory mounts exactly. For `cmsg-root:/opt/new-api`, compose mounts one built binary file to `/new-api`; do not mount a release directory there.
-- For Go binaries running in Alpine containers, build static Linux binaries and verify `file` says `statically linked`.
+- Do not infer a container mount source from the local artifact layout. Before uploading or switching releases, read the remote compose line and verify the host-side source path type matches it. If compose mounts `./releases/name/new-api:/new-api:ro`, upload the built binary as that exact `new-api` file, not as a directory containing it.
+- For Go binaries running in Alpine containers, build static Linux binaries and verify `file` says `statically linked`. If a container says an existing binary has `exec ... no such file or directory`, suspect a missing dynamic loader or wrong architecture before looking for a missing path.
 - Use `sudo -n` in automation so commands fail instead of hanging on password prompts.
 - After switching releases, verify container health plus local and public status endpoints.
 
