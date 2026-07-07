@@ -169,6 +169,15 @@ sudo -n docker compose -f docker-compose.prod.yml ps
 '@ | wsl -d Ubuntu-24.04 -- bash -lc "tr -d '\r' > /tmp/remote.sh && ssh cmsg-root 'sudo -n bash -s' < /tmp/remote.sh"
 ```
 
+If a remote command contains shell metacharacters such as `|`, `(`, `)`, `*`, `$`, `>`, or regex alternation like `grep -E "^(foo|bar):"`, do not embed it as a deeply nested inline `ssh host "..."` string from PowerShell. PowerShell may parse or split parts of the command before SSH receives them. Put the command in a literal here-string and stream it to `ssh host 'bash -s'` or `ssh host 'sudo -n bash -s'`:
+
+```powershell
+@'
+set -euo pipefail
+grep -nE '^(proxy-url|utls-pool-size):' /app/config.yaml || true
+'@ | ssh cmsg-root 'sudo -n bash -s'
+```
+
 If a local bash script is itself fed on stdin, nested `ssh host ...` may consume the rest of that script. Use `ssh -n` for SSH commands that do not need stdin:
 
 ```bash
