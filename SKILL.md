@@ -145,10 +145,19 @@ echo "$release"
 '@ | wsl -d Ubuntu-24.04 -- bash -lc "tr -d '\r' > /tmp/task.sh && bash /tmp/task.sh"
 ```
 
+Inside a PowerShell single-quoted here-string, write bash quotes normally. Do not change bash `"` to `\"` unless the target script really needs a literal backslash. PowerShell will not interpolate a single-quoted here-string, so extra backslashes reach bash and can turn arguments such as `"$repo"` into a literal or empty-looking `""` path.
+
 Avoid this pattern because PowerShell expands `$release` before WSL sees it:
 
 ```powershell
 wsl -d Ubuntu-24.04 -- bash -lc "release=x; echo $release"
+```
+
+When a PowerShell-generated shell script exits with odd messages like `exit: 0\r: numeric argument required`, treat it as CRLF contamination. Normalize the script before execution (`tr -d '\r' > /tmp/task.sh`) or replace CRLF in PowerShell before piping:
+
+```powershell
+$script = $script -replace "`r`n", "`n"
+$script | wsl -d Ubuntu-24.04 -- bash -lc 'cat > /tmp/task.sh && bash /tmp/task.sh'
 ```
 
 ## SSH And Remote Scripts
