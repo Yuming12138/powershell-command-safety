@@ -184,6 +184,16 @@ If a local bash script is itself fed on stdin, nested `ssh host ...` may consume
 ssh -n cmsg-root "df -h /"
 ```
 
+The same stdin rule applies one layer deeper. If the remote bash script is itself being streamed over SSH stdin, nested commands that also read stdin, such as `docker exec -i ...`, `psql <<SQL`, `cat <<EOF`, or `mysql < file`, can consume the rest of the remote script and leave the outer heredoc unterminated. Prefer one of these patterns:
+
+```bash
+ssh host 'bash -s' < remote.sh              # remote.sh should not contain nested stdin consumers
+ssh host 'bash -s' < remote.sh </dev/null   # only when the remote script does not need stdin
+ssh host "docker exec container sh -lc 'psql -c \"SELECT 1\"'"  # no nested -i/stdin
+```
+
+For multi-line SQL or scripts inside a streamed remote script, write the inner content to a temporary file on the remote side first, then pass that file to the nested command.
+
 If a remote script itself contains quoted heredocs or Python snippets, avoid embedding it inside a double-quoted `ssh "sudo bash -lc '...'"` command. Create the remote script as literal text in WSL and pass values as `bash -s --` arguments so neither PowerShell nor the intermediate shell strips quotes:
 
 ```powershell
