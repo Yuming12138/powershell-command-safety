@@ -43,6 +43,8 @@ When updating this skill from GitHub, first verify whether the active skill dire
 - When combining values that may be a scalar or an array, force array shape on both sides before using `+`. PowerShell treats scalar strings as strings, so `$domains + 'api.example.com'` can become one concatenated hostname instead of two items; use `@($domains) + @('api.example.com')` or assign the full explicit array.
 - Avoid PowerShell double-quoted strings around bash/ssh scripts containing `$var`, `$(...)`, backticks, or `\`.
 - Use single quotes for literal strings; use double quotes only when PowerShell interpolation is intended.
+- In an interpolated string, delimit a variable with `${name}` when punctuation such as `:` immediately follows it. PowerShell can parse `$name:` as an invalid scoped-variable reference; use `"failed for ${name}: $code"`.
+- Do not nest a PowerShell here-string inside another here-string that uses the same quote style and terminator. The inner terminator closes the outer string during parsing; build the inner content from a string array joined with `[Environment]::NewLine`, or use a safely different representation.
 - Never compose destructive file operations by enumerating in PowerShell and deleting in `cmd /c`, bash, or another shell.
 - Avoid variable names that collide with built-in variables. PowerShell variable names are case-insensitive, so `$home` collides with read-only `$HOME`, `$matches` collides with automatic `$Matches`, and `$Args` collides with automatic `$args`. Use names such as `$ArgList`, `$Rows`, or `$ResultItems` for function parameters and local collections.
 - Do not pipe directly from a `foreach (...) { ... }` statement block; it can fail with `An empty pipe element is not allowed.` Collect results in an array or use pipeline-native `ForEach-Object` when the output needs to be piped.
@@ -124,14 +126,24 @@ PowerShell parsing differs from the target program's parsing. If arguments conta
 
 Use `curl.exe` when the real curl binary is required; `curl` can be an alias on older Windows PowerShell environments.
 
+`rg` returns exit code `1` when no matches are found. If no matches are an acceptable result, handle codes greater than `1` as errors and explicitly finish the PowerShell command successfully so the stale native exit code does not mark the whole step as failed.
+
+```powershell
+& rg -n 'pattern' $path
+if ($LASTEXITCODE -gt 1) { throw "rg failed: $LASTEXITCODE" }
+exit 0
+```
+
 When stopping processes selected by `Win32_Process.CommandLine`, never rely on command-line text alone: the current PowerShell host can contain the same search text in its own invocation. Restrict the executable name to the expected process types and explicitly exclude `$PID` before calling `Stop-Process`.
+
+An enumerated process can exit before `Stop-Process` runs. When disappearance is an acceptable outcome, stop each verified target with `-ErrorAction SilentlyContinue` so this race does not abort the remaining cleanup or restart sequence.
 
 ```powershell
 $targets = Get-CimInstance Win32_Process | Where-Object {
     $_.ProcessId -ne $PID -and $_.Name -in @('python.exe', 'uvicorn.exe') -and
     $_.CommandLine -and $_.CommandLine -match 'uvicorn.*8000'
 }
-$targets | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+$targets | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 ```
 
 ## Environment Variables
@@ -193,6 +205,13 @@ $script | wsl -d Ubuntu-24.04 -- bash -lc 'cat > /tmp/task.sh && bash /tmp/task.
 ```
 
 ## SSH And Remote Scripts
+
+Do not pipe a Base64 string produced by PowerShell directly into `ssh host 'base64 -d'`. The native pipeline can transcode or decorate text before SSH receives it, causing remote `base64: invalid input`. For small payloads, pass the Base64 text as a quoted SSH command argument and decode from remote `printf`; for larger files, use `rsync` or `scp` with checksum verification instead.
+
+```powershell
+$encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($text))
+& ssh cmsg-root "printf '%s' '$encoded' | base64 -d > /tmp/payload.txt"
+```
 
 For complex remote scripts, prefer:
 
