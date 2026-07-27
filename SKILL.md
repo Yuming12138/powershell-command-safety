@@ -52,6 +52,7 @@ When updating this skill from GitHub, first verify whether the active skill dire
 - Avoid variable names that collide with built-in variables. PowerShell variable names are case-insensitive, so `$home` collides with read-only `$HOME`, `$matches` collides with automatic `$Matches`, and `$Args` collides with automatic `$args`. Use names such as `$ArgList`, `$Rows`, or `$ResultItems` for function parameters and local collections.
 - Do not pipe directly from a `foreach (...) { ... }` statement block; it can fail with `An empty pipe element is not allowed.` Collect results in an array or use pipeline-native `ForEach-Object` when the output needs to be piped.
 - Do not separate multiple command invocations with commas inside `@(...)`. A comma is an expression/array operator, not a command separator, and can be parsed as an unexpected argument. Use `foreach` or save each command result before combining the values.
+- A wrapper that joins argv into one string and executes with `shell: true` destroys the argument boundaries created by a PowerShell array. Inspect wrapper scripts before relying on arrays; if they use patterns such as `commandParts.join(" ")`, include target-shell quotes around values containing spaces (for example, an `Authorization: Bearer ...` header), or prefer a wrapper that uses `spawn`/`execFile` with an argv array. Keep complex JSON and formatting strings out of the rejoined command when possible.
 
 Safe examples:
 
@@ -127,6 +128,14 @@ $obj = Get-Content -Raw -LiteralPath $path | ConvertFrom-Json
 $obj.value
 ```
 
+- A native CLI may print one machine-readable JSON record plus blank lines, reminders, or advisory text to stdout. Do not join the entire output and pass it to `ConvertFrom-Json`. Prefer the tool's JSON-only mode; otherwise check `$LASTEXITCODE`, capture the output as an array, and parse only the record guaranteed by that tool's output contract.
+
+```powershell
+$output = @(& tool.exe --json)
+if ($LASTEXITCODE -ne 0) { throw "tool failed: $LASTEXITCODE" }
+$result = $output[0] | ConvertFrom-Json
+```
+
 - When a log repeats the same metric for setup, substeps, and the final solve,
   `[regex]::Match(...)` returns only the first occurrence and can silently record
   the wrong value. Use `[regex]::Matches(...)`, parse all candidates, then select
@@ -170,6 +179,14 @@ exit 0
 When stopping processes selected by `Win32_Process.CommandLine`, never rely on command-line text alone: the current PowerShell host can contain the same search text in its own invocation. Restrict the executable name to the expected process types and explicitly exclude `$PID` before calling `Stop-Process`.
 
 An enumerated process can exit before `Stop-Process` runs. When disappearance is an acceptable outcome, stop each verified target with `-ErrorAction SilentlyContinue` so this race does not abort the remaining cleanup or restart sequence.
+
+When several process names are optional, avoid one `Get-Process -Name a,b,c -ErrorAction SilentlyContinue` call. If any requested name is absent, PowerShell can leave the command status failed even while returning the processes that do exist. Enumerate once and filter the returned objects, or query each optional name separately and normalize absence as expected:
+
+```powershell
+$processRows = Get-Process | Where-Object {
+    $_.ProcessName -in @('solver', 'solver-server', 'solver-launcher')
+}
+```
 
 ```powershell
 $targets = Get-CimInstance Win32_Process | Where-Object {
