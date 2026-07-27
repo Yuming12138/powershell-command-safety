@@ -38,16 +38,20 @@ When updating this skill from GitHub, first verify whether the active skill dire
 - Prefer one shell at a time. If a task is pure PowerShell, use PowerShell cmdlets end to end.
 - Prefer `-LiteralPath` for file paths that may contain brackets, wildcards, `&`, spaces, or non-ASCII characters.
 - Prefer arrays for native executable arguments when constructing commands in variables.
+- When a PowerShell command is embedded in JavaScript that calls `tools.shell_command`, do not use a JavaScript template literal if the PowerShell text contains raw backticks. A PowerShell line-continuation backtick can terminate or corrupt the JavaScript template and cause a JavaScript `SyntaxError` before PowerShell starts. Prefer a normal quoted JavaScript string, construct an argument array, or remove PowerShell line continuations and keep the command on one line.
+- JavaScript template literals also expand `${...}` before PowerShell, WSL, Bash, or SSH receives the command. If an embedded script must contain shell expressions such as `${target}`, either escape the dollar sign as `\${target}` in the JavaScript template or avoid the template literal and build the command from ordinary strings. A `ReferenceError` from the JavaScript wrapper means the target shell never started.
 - Windows npm/npx shims and Node CLIs that spawn package-manager commands can misparse working directories containing shell metacharacters such as `&`. If a project must remain in such a path, run the tool through a persistent junction or other alias whose path contains no shell metacharacters; keep the source files at their original location.
 - `wsl.exe` command forwarding can also lose quoting around Linux paths derived from Windows directories containing `&`. For syntax checks or other stdin-capable commands, stream normalized file contents to WSL (for example, `Get-Content -Raw ... | wsl -- sh -n -`) instead of passing the metacharacter-containing path. For commands that require a path, copy to a verified short temporary path or run entirely within a safely quoted WSL script.
 - When combining values that may be a scalar or an array, force array shape on both sides before using `+`. PowerShell treats scalar strings as strings, so `$domains + 'api.example.com'` can become one concatenated hostname instead of two items; use `@($domains) + @('api.example.com')` or assign the full explicit array.
 - Avoid PowerShell double-quoted strings around bash/ssh scripts containing `$var`, `$(...)`, backticks, or `\`.
 - Use single quotes for literal strings; use double quotes only when PowerShell interpolation is intended.
+- PowerShell does not use backslash as a general quote escape. Do not write Bash-style `\"` inside a double-quoted PowerShell string to protect regex or native-command arguments; use a single-quoted literal instead, or a PowerShell backtick only when interpolation is genuinely required. Example: `$pattern = 'create\("std|create\("sol'`.
 - In an interpolated string, delimit a variable with `${name}` when punctuation such as `:` immediately follows it. PowerShell can parse `$name:` as an invalid scoped-variable reference; use `"failed for ${name}: $code"`.
 - Do not nest a PowerShell here-string inside another here-string that uses the same quote style and terminator. The inner terminator closes the outer string during parsing; build the inner content from a string array joined with `[Environment]::NewLine`, or use a safely different representation.
 - Never compose destructive file operations by enumerating in PowerShell and deleting in `cmd /c`, bash, or another shell.
 - Avoid variable names that collide with built-in variables. PowerShell variable names are case-insensitive, so `$home` collides with read-only `$HOME`, `$matches` collides with automatic `$Matches`, and `$Args` collides with automatic `$args`. Use names such as `$ArgList`, `$Rows`, or `$ResultItems` for function parameters and local collections.
 - Do not pipe directly from a `foreach (...) { ... }` statement block; it can fail with `An empty pipe element is not allowed.` Collect results in an array or use pipeline-native `ForEach-Object` when the output needs to be piped.
+- Do not separate multiple command invocations with commas inside `@(...)`. A comma is an expression/array operator, not a command separator, and can be parsed as an unexpected argument. Use `foreach` or save each command result before combining the values.
 
 Safe examples:
 
@@ -80,10 +84,27 @@ Do not rely on `$?` after several commands; it only reflects the most recent pip
 ## Paths And Files
 
 - Use `Join-Path`, `Resolve-Path`, and `[System.IO.Path]` rather than manual string concatenation for Windows paths.
+- Before reading a path inferred from a filename convention, discover it with `rg --files` or verify it with `Test-Path -LiteralPath`. In multi-file diagnostics, handle missing optional files separately so one guessed path does not add a misleading PowerShell error to otherwise valid output.
+- When you need real file line numbers, use `Select-String -LiteralPath $path -Pattern ...`. `Select-String -InputObject $lines` does not enumerate a line array as separate pipeline records and can report the whole array as line 1, producing incorrect context ranges. If the content is already in memory, enumerate it explicitly and retain the index.
+- In aggregated or parallel diagnostics, never mix guessed paths with verified paths in one `rg` call. One missing explicit input makes `rg` return exit code `2`, and a wrapper may discard or obscure useful output from the valid branches. Discover names first with `rg --files`, validate each path, then search missing-prone inputs separately.
+- On Windows, do not pass a wildcard such as `path\phase1b_*` as an explicit `rg` input path; `rg` does not expand that path glob and can return OS error 123. Pass the real directory and filter filenames with `--glob 'phase1b_*'` instead.
 - `New-Item` creates paths with `-Path`, not `-LiteralPath`; use `-Path` for creation, then use `-LiteralPath` for later reads, copies, moves, or deletes.
 - Before recursive delete or move, resolve the final target and verify it is inside the intended directory.
 - Use `Copy-Item`/`Move-Item`/`Remove-Item` with `-LiteralPath`; avoid `del`, `rd`, and `cmd /c` unless explicitly required.
 - If creating temporary files for scripts, use `$env:TEMP` or `[System.IO.Path]::GetTempPath()`.
+- Do not use `[IO.File]::ReadAllBytes()` merely to inspect a large file. On this PowerShell/.NET path it can reject files larger than 2 GB and would allocate the whole file even when only a header is needed. Open a `FileStream` and read only the required prefix; use streaming APIs such as `Get-FileHash` for full-file hashes.
+
+```powershell
+$stream = [IO.File]::OpenRead($path)
+try {
+    $magic = [byte[]]::new(4)
+    if ($stream.Read($magic, 0, $magic.Length) -ne $magic.Length) {
+        throw "File is shorter than four bytes: $path"
+    }
+} finally {
+    $stream.Dispose()
+}
+```
 
 Safe recursive cleanup pattern:
 
@@ -106,9 +127,15 @@ $obj = Get-Content -Raw -LiteralPath $path | ConvertFrom-Json
 $obj.value
 ```
 
+- When a log repeats the same metric for setup, substeps, and the final solve,
+  `[regex]::Match(...)` returns only the first occurrence and can silently record
+  the wrong value. Use `[regex]::Matches(...)`, parse all candidates, then select
+  the explicitly intended last or maximum value.
+
 - JSON files such as `package-lock.json` commonly contain an empty-string property key. Parse these with `ConvertFrom-Json -AsHashTable`; normal object conversion rejects empty property names.
 
 - Under `Set-StrictMode -Version Latest`, reading a missing property from `ConvertFrom-Json` output throws instead of returning `$null`. For optional API fields, check `$obj.PSObject.Properties['name']` first or use a helper that returns `$null` for absent fields.
+- Under `Set-StrictMode -Version Latest`, aggregated command output can also lack an expected property when the input is empty or the command returned no object. Before reading values such as `(Measure-Object ...).Sum`, store the result and check both the result and `$result.PSObject.Properties['Sum']`; otherwise a secondary metadata error can hide the original command failure.
 - Do not pipe data into a command that also uses a heredoc for its program text. For example, `curl ... | python3 - <<'PY'` sends the heredoc script to Python stdin, so the piped JSON is lost. Use `python3 -c '...'` to read piped stdin, or write the data to a temporary file and pass the file path as an argument.
 - When writing scripts that will run in WSL or Linux, strip CRLF or generate them inside WSL. CRLF symptoms include `sort\r: command not found`, broken heredoc terminators, and correct-looking paths reported as missing.
 - When patching files that live only inside WSL, do not pass Linux paths like `/home/...` to a Windows-side patcher; it may resolve them as `D:\home\...` or another invalid Windows path. Either use a Windows UNC path such as `\\wsl.localhost\Ubuntu-24.04\home\...` from Windows, or run the patch tool entirely inside WSL. Preserve the file's existing line endings when using ad hoc scripts so a one-line edit does not become a whole-file diff.
@@ -119,6 +146,8 @@ $obj.value
 
 PowerShell parsing differs from the target program's parsing. If arguments contain characters PowerShell treats specially, pass them as separate arguments:
 
+- Invoke Python scripts through an explicit `python.exe` or known environment interpreter. Do not rely on executing a `.py` path through Windows file associations; that path may not provide a reliable native `$LASTEXITCODE`.
+
 ```powershell
 & ssh cmsg-root 'df -h /'
 & curl.exe -sS -o NUL -w 'status=%{http_code}\n' 'https://example.com'
@@ -127,6 +156,10 @@ PowerShell parsing differs from the target program's parsing. If arguments conta
 Use `curl.exe` when the real curl binary is required; `curl` can be an alias on older Windows PowerShell environments.
 
 `rg` returns exit code `1` when no matches are found. If no matches are an acceptable result, handle codes greater than `1` as errors and explicitly finish the PowerShell command successfully so the stale native exit code does not mark the whole step as failed.
+
+Before passing multiple explicit paths to `rg`, verify that every path exists. If any input path is missing, `rg` returns exit code `2` even when the other paths are valid; report the missing path instead of treating the whole search as a content or downstream-tool failure.
+
+Do not run an unbounded recursive `rg` over a large vendor installation or documentation tree. Use the vendor's index/search utility when available; otherwise restrict the search to a confirmed module/subdirectory and narrow file globs. A timeout from an oversized search is a scope failure, not evidence that the requested text is absent.
 
 ```powershell
 & rg -n 'pattern' $path
