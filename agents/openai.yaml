@@ -1,4 +1,4 @@
 interface:
   display_name: "PowerShell Command Safety"
-  short_description: "Safer PowerShell commands and interop"
-  default_prompt: "Use $powershell-command-safety to write and run these PowerShell commands safely."
+  short_description: "Safe PowerShell and shell-boundary guidance"
+  default_prompt: "Use $powershell-command-safety to construct and verify these PowerShell commands safely."
