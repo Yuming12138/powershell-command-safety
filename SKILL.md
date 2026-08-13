@@ -13,6 +13,14 @@ Treat PowerShell as its own shell, not as bash with different syntax. Before run
 
 Decide which layer should expand variables, globs, quotes, redirection, and command substitution. Most failures come from the wrong layer expanding first.
 
+On this Windows machine, use PowerShell 7 explicitly for PowerShell work:
+
+```powershell
+& 'C:\Program Files\PowerShell\7\pwsh.exe' -NoLogo -NoProfile -Command '<command>'
+```
+
+Do not assume `powershell.exe` is PowerShell 7: it resolves to Windows PowerShell 5.1 here, while PowerShell 7 is installed side by side as `pwsh.exe`. Prefer the exact path above unless a task specifically requires legacy Windows PowerShell 5.1. Before a version-sensitive workflow, verify `$PSVersionTable.PSVersion` in the invoked host.
+
 ## Continuous Maintenance
 
 Keep this skill current. Whenever a PowerShell command or script fails in a reusable way, update this skill after the immediate task is stable.
@@ -37,11 +45,14 @@ When updating this skill from GitHub, first verify whether the active skill dire
 
 - Prefer one shell at a time. If a task is pure PowerShell, use PowerShell cmdlets end to end.
 - Prefer `-LiteralPath` for file paths that may contain brackets, wildcards, `&`, spaces, or non-ASCII characters.
+- Distinguish a current-directory relative path from a current-drive rooted path. In PowerShell, `.\\.venv\\Scripts\\python.exe` resolves under the current directory, while `\\.venv\\Scripts\\python.exe` resolves from the current drive root and can silently target the wrong location. Verify executable paths with `Test-Path -LiteralPath` before invocation when a downstream check depends on them.
 - Prefer arrays for native executable arguments when constructing commands in variables.
 - When a PowerShell command is embedded in JavaScript that calls `tools.shell_command`, do not use a JavaScript template literal if the PowerShell text contains raw backticks. A PowerShell line-continuation backtick can terminate or corrupt the JavaScript template and cause a JavaScript `SyntaxError` before PowerShell starts. Prefer a normal quoted JavaScript string, construct an argument array, or remove PowerShell line continuations and keep the command on one line.
 - JavaScript template literals also expand `${...}` before PowerShell, WSL, Bash, or SSH receives the command. If an embedded script must contain shell expressions such as `${target}`, either escape the dollar sign as `\${target}` in the JavaScript template or avoid the template literal and build the command from ordinary strings. A `ReferenceError` from the JavaScript wrapper means the target shell never started.
 - Windows npm/npx shims and Node CLIs that spawn package-manager commands can misparse working directories containing shell metacharacters such as `&`. If a project must remain in such a path, run the tool through a persistent junction or other alias whose path contains no shell metacharacters; keep the source files at their original location.
 - `wsl.exe` command forwarding can also lose quoting around Linux paths derived from Windows directories containing `&`. For syntax checks or other stdin-capable commands, stream normalized file contents to WSL (for example, `Get-Content -Raw ... | wsl -- sh -n -`) instead of passing the metacharacter-containing path. For commands that require a path, copy to a verified short temporary path or run entirely within a safely quoted WSL script.
+- Avoid wrapping a multi-command Bash script with local Bash variables inside `wsl -- bash -lc '...'` from PowerShell. Argument forwarding can discard the intended quoting or expand variables in the wrong layer while still returning exit code 0. Prefer direct one-command calls such as `wsl -- rsync ...`; if a script truly needs stdin, normalize CRLF before Bash and verify the expected remote file, size, and checksum afterward. A zero exit code without the expected artifact is not success.
+- When running multiple WSL scripts concurrently, give every invocation a unique temporary script path. Parallel calls that all write `/tmp/task.sh` can overwrite one another between the write and execution steps, producing mixed commands or misleading failures; derive the name from the job or use a collision-resistant temporary path.
 - When combining values that may be a scalar or an array, force array shape on both sides before using `+`. PowerShell treats scalar strings as strings, so `$domains + 'api.example.com'` can become one concatenated hostname instead of two items; use `@($domains) + @('api.example.com')` or assign the full explicit array.
 - Avoid PowerShell double-quoted strings around bash/ssh scripts containing `$var`, `$(...)`, backticks, or `\`.
 - Use single quotes for literal strings; use double quotes only when PowerShell interpolation is intended.
@@ -50,7 +61,8 @@ When updating this skill from GitHub, first verify whether the active skill dire
 - Do not nest a PowerShell here-string inside another here-string that uses the same quote style and terminator. The inner terminator closes the outer string during parsing; build the inner content from a string array joined with `[Environment]::NewLine`, or use a safely different representation.
 - Never compose destructive file operations by enumerating in PowerShell and deleting in `cmd /c`, bash, or another shell.
 - Avoid variable names that collide with built-in variables. PowerShell variable names are case-insensitive, so `$home` collides with read-only `$HOME`, `$matches` collides with automatic `$Matches`, and `$Args` collides with automatic `$args`. Use names such as `$ArgList`, `$Rows`, or `$ResultItems` for function parameters and local collections.
-- Do not pipe directly from a `foreach (...) { ... }` statement block; it can fail with `An empty pipe element is not allowed.` Collect results in an array or use pipeline-native `ForEach-Object` when the output needs to be piped.
+- Do not pipe directly from a `foreach (...) { ... }` statement block; it can fail with `An empty pipe element is not allowed.` This includes compact one-line monitoring commands that put `| Format-Table` immediately after the closing brace. Collect results in an array first (`$Rows = foreach (...) { ... }; $Rows | Format-Table`) or use pipeline-native `ForEach-Object`.
+- Do not place an `if (...) { ... } else { ... }` statement inside ordinary parentheses as though it were a value expression. PowerShell can try to invoke `if` as a command and emit `The term 'if' is not recognized`, while a non-strict wrapper may still finish with exit code 0. Assign the conditional result first (`$expected = if ($condition) { $a } else { $b }`), then use `$expected` in the surrounding expression; start validation wrappers with `$ErrorActionPreference = 'Stop'` so such errors cannot be masked.
 - Do not separate multiple command invocations with commas inside `@(...)`. A comma is an expression/array operator, not a command separator, and can be parsed as an unexpected argument. Use `foreach` or save each command result before combining the values.
 - A wrapper that joins argv into one string and executes with `shell: true` destroys the argument boundaries created by a PowerShell array. Inspect wrapper scripts before relying on arrays; if they use patterns such as `commandParts.join(" ")`, include target-shell quotes around values containing spaces (for example, an `Authorization: Bearer ...` header), or prefer a wrapper that uses `spawn`/`execFile` with an argv array. Keep complex JSON and formatting strings out of the rejoined command when possible.
 
@@ -82,10 +94,20 @@ if ($LASTEXITCODE -ne 0) { throw "git status failed: $LASTEXITCODE" }
 
 Do not rely on `$?` after several commands; it only reflects the most recent pipeline status.
 
+When launching a long-running native solver or batch executable through an
+orchestrator with a short command timeout, the outer PowerShell wrapper may
+exit while the child process continues. That can orphan the solver and lose
+wrapper-generated metadata or tee logs without proving that the solver failed.
+Use a timeout longer than the expected run, or launch through a separately
+tracked process and monitor its PID. If a timeout occurs, inspect the child
+process, logs, and output artifact before retrying; never start a duplicate
+run solely because the wrapper timed out.
+
 ## Paths And Files
 
 - Use `Join-Path`, `Resolve-Path`, and `[System.IO.Path]` rather than manual string concatenation for Windows paths.
 - Before reading a path inferred from a filename convention, discover it with `rg --files` or verify it with `Test-Path -LiteralPath`. In multi-file diagnostics, handle missing optional files separately so one guessed path does not add a misleading PowerShell error to otherwise valid output.
+- For bundled document/PDF runtimes, load the workspace dependency manifest and discover the actual executable before invoking it; do not assume a historical layout such as `dependencies\bin\override`. Verify `pdfinfo.exe` / `pdftoppm.exe` with `Test-Path` or `rg --files` because bundled Poppler may live under a versioned or native path such as `dependencies\native\poppler\Library\bin`.
 - When you need real file line numbers, use `Select-String -LiteralPath $path -Pattern ...`. `Select-String -InputObject $lines` does not enumerate a line array as separate pipeline records and can report the whole array as line 1, producing incorrect context ranges. If the content is already in memory, enumerate it explicitly and retain the index.
 - In aggregated or parallel diagnostics, never mix guessed paths with verified paths in one `rg` call. One missing explicit input makes `rg` return exit code `2`, and a wrapper may discard or obscure useful output from the valid branches. Discover names first with `rg --files`, validate each path, then search missing-prone inputs separately.
 - On Windows, do not pass a wildcard such as `path\phase1b_*` as an explicit `rg` input path; `rg` does not expand that path glob and can return OS error 123. Pass the real directory and filter filenames with `--glob 'phase1b_*'` instead.
@@ -94,6 +116,7 @@ Do not rely on `$?` after several commands; it only reflects the most recent pip
 - Use `Copy-Item`/`Move-Item`/`Remove-Item` with `-LiteralPath`; avoid `del`, `rd`, and `cmd /c` unless explicitly required.
 - If creating temporary files for scripts, use `$env:TEMP` or `[System.IO.Path]::GetTempPath()`.
 - Do not use `[IO.File]::ReadAllBytes()` merely to inspect a large file. On this PowerShell/.NET path it can reject files larger than 2 GB and would allocate the whole file even when only a header is needed. Open a `FileStream` and read only the required prefix; use streaming APIs such as `Get-FileHash` for full-file hashes.
+- When a Python build creates deeply nested staging directories on Windows, `WinError 3` can mean the generated path exceeded the traditional 260-character limit rather than that the source file is absent. A `subst` alias may not help when the application calls `Path.resolve()` and expands the alias back to the long path. Prefer passing an extended-length absolute path such as `\\?\D:\long\path` to the build/workspace API, verify that the prefixed path exists, and use a genuinely shorter checkout if a third-party library cannot preserve the prefix.
 
 ```powershell
 $stream = [IO.File]::OpenRead($path)
@@ -256,6 +279,8 @@ $script | wsl -d Ubuntu-24.04 -- bash -lc 'cat > /tmp/task.sh && bash /tmp/task.
 
 ## SSH And Remote Scripts
 
+Do not assume a standalone `ssh host '<command>'` inherits the working directory of a Slurm job, service, prior SSH session, or local shell. SSH normally starts the command in the remote account's home directory. Use an explicit absolute path or begin with `cd <verified-root>` before probing relative job artifacts; otherwise valid outputs can be falsely reported missing.
+
 Do not pipe a Base64 string produced by PowerShell directly into `ssh host 'base64 -d'`. The native pipeline can transcode or decorate text before SSH receives it, causing remote `base64: invalid input`. For small payloads, pass the Base64 text as a quoted SSH command argument and decode from remote `printf`; for larger files, use `rsync` or `scp` with checksum verification instead.
 
 ```powershell
@@ -336,6 +361,8 @@ For large files over unstable SSH, prefer resumable or chunked approaches:
 2. Split into small chunks, upload with `ssh host "cat > /tmp/chunks/part-aa" < part-aa`, concatenate remotely.
 3. Always verify `sha256sum` before installing.
 
+Do not hand-transcribe SHA-256 values into an upload-verification wrapper. Read the local values directly with `Get-FileHash`, parse the remote `sha256sum` output, normalize case, and compare the machine-derived collections. A one-character transcription error otherwise creates a false transfer failure even when the files are identical.
+
 When generating checksum files for upload, do not keep the source machine's absolute path in the `.sha256` file. Either write the checksum with the target filename only, or pass the expected hash as a separate argument and compare it to `sha256sum <remote-file>`. A checksum line such as `/home/me/cache/release/bin` will fail on the remote host even when the upload succeeded.
 
 ## Deployment And Runtime Config
@@ -350,6 +377,25 @@ When generating checksum files for upload, do not keep the source machine's abso
 - After switching releases, verify container health plus local and public status endpoints.
 
 ## Quick Debug Checklist
+
+Observed recurrence:
+
+- `2026-08-03`: A PDF inspection step assumed bundled Poppler lived at `dependencies\bin\override\pdfinfo.exe`; the active desktop runtime placed `pdfinfo.exe` and `pdftoppm.exe` under `dependencies\native\poppler\Library\bin`. The official PDF, extracted pages, and COMSOL project artifacts were unchanged. Load the workspace dependency paths first and verify the executable instead of reusing a historical bundle layout.
+- `2026-08-03`: A validator-discovery read combined a guessed nonexistent Phase 1B filename with a real Phase 1C validator; the missing path caused the aggregate read to fail before returning the valid file. No COMSOL command ran and no model or evidence file changed. Apply the existing discovery rule: enumerate matching files first, then read only verified paths.
+
+- `2026-08-02`: A read-only `rg` search passed `docs\\phase1b*` as an explicit Windows input path beside valid paths. `rg` returned OS error 123 after printing useful matches from the valid inputs. No COMSOL session, model, or result was touched. Apply the existing rule consistently: pass the real `docs` directory and filter names with `--glob 'phase1b*'`; never use an unexpanded wildcard as an explicit Windows path.
+- `2026-08-02`: Standalone SSH artifact probes used Slurm-workdir-relative paths without first changing to the remote project root. SSH started in the account home directory, so valid in-progress output/log paths were falsely reported absent or unavailable. No remote job or artifact was modified. Use absolute remote paths or an explicit `cd` in every independent SSH probe; do not inherit directory assumptions from `scontrol WorkDir`.
+- `2026-08-02`: A compact artifact-verification command put `| Format-Table` directly after a `foreach (...) { ... }` statement and PowerShell stopped at parse time with `An empty pipe element is not allowed.` No JSON, MPH, or solver state was touched. Apply the existing rule consistently: assign `$Rows = foreach (...) { ... }` first, then pipe `$Rows` in a separate statement.
+- `2026-08-02`: A Slurm script using Bash-only `[[ ... =~ ... ]]` syntax was piped from PowerShell to `wsl.exe -- sh -n -`; Dash rejected the regex grouping with `Syntax error: "(" unexpected` even though the script was intended for Bash. No solver or job started. Match the syntax checker to the script shebang: use `wsl.exe -- bash -n -` for `#!/usr/bin/env bash` scripts, and reserve `sh -n` for POSIX-shell scripts.
+- `2026-08-02` (3 occurrences): Slurm monitoring wrappers first slept inside the command before SSH probes and twice exhausted their total budgets. A third no-sleep probe showed `squeue` returning in about 1 second while a single `grep` of a shared `/home` log exceeded 60 seconds, isolating shared-storage latency from scheduler/job health. None of these wrapper timeouts was evidence that the job failed. Do not sleep inside remote-monitor wrappers; poll scheduler state separately, avoid live shared-log reads while storage is slow, add `-o ConnectTimeout=<n>` to every SSH probe, and give each query its own explicit headroom.
+- `2026-08-02`: A combined static-check command was rejected by the host policy before PowerShell started because it included an optional `Remove-Item -Force` for a generated `.class` beside the real compile and syntax checks. Nothing was deleted or compiled. Avoid optional cleanup inside multi-purpose validation commands; compile in place and prove freshness from timestamps, size, and hash instead.
+- `2026-08-02`: A read-only `rg` discovery command correctly treated exit `1` as "no matches", but the PowerShell wrapper did not explicitly `exit 0`; the stale native exit code made the whole tool call look failed. No COMSOL or project artifact was touched. After accepting an `rg` no-match result, explicitly terminate successfully before leaving the wrapper.
+- `2026-08-02` (2 occurrences): Remote `ls` probes mixed known-existing paths with speculative optional paths. First, absent `/local` and `/scratch` hid valid `/tmp` and `/dev/shm` evidence; later, a guessed Linux `bin/comsolcompile` path made a verified `bin/comsol` probe return exit `2` after upload hashes had already matched. Probe optional remote paths separately and do not aggregate known-existing and speculative paths into one native call.
+- `2026-08-02` (2 occurrences; second on `2026-08-04`): A PowerShell here-string streamed directly to Windows `ssh` left a remote Bash `for ... do/done` validation loop unterminated, producing `syntax error: unexpected end of file`; the second occurrence happened in a read-only artifact probe even after local CRLF replacement. The upload/solver evidence had already completed and neither occurrence modified remote state. For a few optional exact paths, use separate explicit `ssh host 'test/stat ...'` calls instead of a streamed loop; for genuinely complex scripts, normalize and execute through WSL before SSH.
+- `2026-08-02` (3 occurrences): Aggregated reads/searches mixed guessed paths with valid inputs. The first used a guessed project JSON path; the second passed two nonexistent site-packages directories beside real `sim` paths to `rg`; the third asked `Get-FileHash` to hash a remote-only compiled class beside valid local source files. Useful output from valid inputs could be obscured by the missing path, but no downstream model action occurred. Discover exact filenames/directories with `rg --files` or `Test-Path -LiteralPath`, then operate only on verified inputs.
+- `2026-07-31` (2 occurrences): PowerShell double-quoted SSH loops expanded remote Bash variables (`$f`, then `$x`) locally; the first produced `bash: \\: No such file or directory`, while the second silently skipped the intended fdinfo loop. No remote artifact was modified. After the first occurrence, do not issue another inline remote-variable loop in the same task; switch immediately to a literal here-string streamed to `ssh host 'bash -s'`, or use explicit paths when only a few files are involved.
+- `2026-07-31`: Wrapping `ssh` directly in `Measure-Command { ... }` returned elapsed time but swallowed the remote diagnostic output. No remote state changed. When both output and timing are required, use `System.Diagnostics.Stopwatch` around a normal native invocation, preserve `$LASTEXITCODE`, and print timing only after the command output has passed through.
+- `2026-07-31`: Two timed-out `rg` PIDs exited naturally between inspection and `Stop-Process`, so an exact cleanup command emitted benign "process identifier not found" errors. No unrelated process was targeted. For race-prone cleanup of already-verified PIDs, use `Stop-Process -Id ... -ErrorAction SilentlyContinue`, then verify absence separately; do not interpret an already-exited target as cleanup failure.
 
 When PowerShell behavior looks wrong:
 
