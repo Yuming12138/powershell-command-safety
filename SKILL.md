@@ -54,6 +54,7 @@ When updating this skill from GitHub, first verify whether the active skill dire
 - Avoid wrapping a multi-command Bash script with local Bash variables inside `wsl -- bash -lc '...'` from PowerShell. Argument forwarding can discard the intended quoting or expand variables in the wrong layer while still returning exit code 0. Prefer direct one-command calls such as `wsl -- rsync ...`; if a script truly needs stdin, normalize CRLF before Bash and verify the expected remote file, size, and checksum afterward. A zero exit code without the expected artifact is not success.
 - When running multiple WSL scripts concurrently, give every invocation a unique temporary script path. Parallel calls that all write `/tmp/task.sh` can overwrite one another between the write and execution steps, producing mixed commands or misleading failures; derive the name from the job or use a collision-resistant temporary path.
 - When combining values that may be a scalar or an array, force array shape on both sides before using `+`. PowerShell treats scalar strings as strings, so `$domains + 'api.example.com'` can become one concatenated hostname instead of two items; use `@($domains) + @('api.example.com')` or assign the full explicit array.
+- Native commands can return multi-line output as a PowerShell array. Before applying whole-document regex checks, join or cast the output to one string; `$lines -notmatch 'needle'` returns every nonmatching line and can be truthy even when another line matches. Use `$text = $lines -join "`n"; if ($text -notmatch 'needle') { ... }`.
 - Avoid PowerShell double-quoted strings around bash/ssh scripts containing `$var`, `$(...)`, backticks, or `\`.
 - Use single quotes for literal strings; use double quotes only when PowerShell interpolation is intended.
 - PowerShell does not use backslash as a general quote escape. Do not write Bash-style `\"` inside a double-quoted PowerShell string to protect regex or native-command arguments; use a single-quoted literal instead, or a PowerShell backtick only when interpolation is genuinely required. Example: `$pattern = 'create\("std|create\("sol'`.
@@ -61,10 +62,17 @@ When updating this skill from GitHub, first verify whether the active skill dire
 - Do not nest a PowerShell here-string inside another here-string that uses the same quote style and terminator. The inner terminator closes the outer string during parsing; build the inner content from a string array joined with `[Environment]::NewLine`, or use a safely different representation.
 - Never compose destructive file operations by enumerating in PowerShell and deleting in `cmd /c`, bash, or another shell.
 - Avoid variable names that collide with built-in variables. PowerShell variable names are case-insensitive, so `$home` collides with read-only `$HOME`, `$matches` collides with automatic `$Matches`, and `$Args` collides with automatic `$args`. Use names such as `$ArgList`, `$Rows`, or `$ResultItems` for function parameters and local collections.
-- Do not pipe directly from a `foreach (...) { ... }` statement block; it can fail with `An empty pipe element is not allowed.` This includes compact one-line monitoring commands that put `| Format-Table` immediately after the closing brace. Collect results in an array first (`$Rows = foreach (...) { ... }; $Rows | Format-Table`) or use pipeline-native `ForEach-Object`.
+- Do not pipe directly from a `foreach (...) { ... }` statement block; it can fail with `An empty pipe element is not allowed.` This includes compact one-line monitoring commands that put `| Format-Table` immediately after the closing brace. Before running multi-line PowerShell, check that no closing `}` from a `foreach` block is immediately followed by `|`. Collect results first (`$Rows = foreach ($item in $items) { ... }; $Rows | Format-Table`) or use pipeline-native `$items | ForEach-Object { ... } | Format-Table`.
 - Do not place an `if (...) { ... } else { ... }` statement inside ordinary parentheses as though it were a value expression. PowerShell can try to invoke `if` as a command and emit `The term 'if' is not recognized`, while a non-strict wrapper may still finish with exit code 0. Assign the conditional result first (`$expected = if ($condition) { $a } else { $b }`), then use `$expected` in the surrounding expression; start validation wrappers with `$ErrorActionPreference = 'Stop'` so such errors cannot be masked.
 - Do not separate multiple command invocations with commas inside `@(...)`. A comma is an expression/array operator, not a command separator, and can be parsed as an unexpected argument. Use `foreach` or save each command result before combining the values.
 - A wrapper that joins argv into one string and executes with `shell: true` destroys the argument boundaries created by a PowerShell array. Inspect wrapper scripts before relying on arrays; if they use patterns such as `commandParts.join(" ")`, include target-shell quotes around values containing spaces (for example, an `Authorization: Bearer ...` header), or prefer a wrapper that uses `spawn`/`execFile` with an argv array. Keep complex JSON and formatting strings out of the rejoined command when possible.
+- Under `Set-StrictMode`, a pipeline that produces no objects assigns `$null`, so reading a property such as `$stats.Sum` throws. Wrap potentially empty output in an array and branch on its count before accessing properties: `$results = @(Get-ChildItem ... | Measure-Object Length -Sum); $sum = if ($results.Count) { $results[0].Sum } else { 0 }`.
+
+Unsafe:
+
+```powershell
+foreach ($item in $items) { [pscustomobject]@{ Name = $item.Name } } | Format-Table
+```
 
 Safe examples:
 
@@ -281,12 +289,23 @@ $script | wsl -d Ubuntu-24.04 -- bash -lc 'cat > /tmp/task.sh && bash /tmp/task.
 
 Do not assume a standalone `ssh host '<command>'` inherits the working directory of a Slurm job, service, prior SSH session, or local shell. SSH normally starts the command in the remote account's home directory. Use an explicit absolute path or begin with `cd <verified-root>` before probing relative job artifacts; otherwise valid outputs can be falsely reported missing.
 
+PowerShell does not support Bash here-strings such as `<<< $value`; it parses
+`<<<` as invalid redirection. If an SSH operation needs both a remote script
+and data, stream the script on stdin and pass the data as a safely encoded
+argument (for example Base64), or create a verified temporary file.
+
 Do not pipe a Base64 string produced by PowerShell directly into `ssh host 'base64 -d'`. The native pipeline can transcode or decorate text before SSH receives it, causing remote `base64: invalid input`. For small payloads, pass the Base64 text as a quoted SSH command argument and decode from remote `printf`; for larger files, use `rsync` or `scp` with checksum verification instead.
 
 ```powershell
 $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($text))
 & ssh cmsg-root "printf '%s' '$encoded' | base64 -d > /tmp/payload.txt"
 ```
+
+Also note that piping a PowerShell string to a native executable can serialize
+records with CRLF even after CR characters were removed from the in-memory
+string. For Linux scripts sent to `ssh host 'bash -s'`, normalize on the Linux
+side with `tr -d '\r'`, or ensure a harmless final comment absorbs a possible
+trailing CR and verify the remote result independently.
 
 For complex remote scripts, prefer:
 
