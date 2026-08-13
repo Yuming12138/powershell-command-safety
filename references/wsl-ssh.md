@@ -1,9 +1,9 @@
 # WSL And SSH Reference
 
 Use this reference when a PowerShell command crosses into WSL/Bash, SSH, a
-container, or a file-transfer boundary. For actual server operations, use the
-installed `ssh-skill` and its Python helpers; the commands below describe shell
-ownership and validation patterns, not an exception to that rule.
+container, or a file-transfer boundary. On Windows, discover and invoke
+`ssh.exe`, `scp.exe`, or `sftp.exe` explicitly. Use WSL `rsync` only after
+verifying it is installed in the selected distribution.
 
 ## WSL Scripts
 
@@ -39,6 +39,19 @@ python3 -c 'import json,sys; print(json.dumps({"path": sys.argv[1]}))' "$path"
 An independent SSH command starts in the remote account's home directory. Use
 an absolute path or `cd` to a verified root in every standalone probe.
 
+Discover the native client, use a configured alias from the user's SSH config,
+and make automation fail instead of prompting indefinitely:
+
+```powershell
+$sshPath = (Get-Command ssh.exe -ErrorAction Stop).Source
+& $sshPath -o BatchMode=yes -o ConnectTimeout=15 $hostAlias 'pwd'
+if ($LASTEXITCODE -ne 0) { throw "SSH probe failed: $LASTEXITCODE" }
+```
+
+Do not set `StrictHostKeyChecking=no` or discard `known_hosts` to bypass an
+identity error. Verify the alias, expected host key, identity file, user, and
+port. Keep private keys and passwords out of command lines and logs.
+
 If a script is streamed to a remote shell, avoid nested commands that consume
 the same stdin. Use `ssh -n` only for commands that do not need stdin. Never
 write both `< remote.sh` and `< /dev/null` on the same command: the latter
@@ -46,7 +59,7 @@ overrides the former. If the remote script needs stdin disabled for a nested
 command, apply `</dev/null` to that nested command instead.
 
 ```bash
-# Illustrative shell shape only; use `ssh-skill` helpers for actual operations.
+# Bash/WSL shell shape; PowerShell does not support `< file` input redirection.
 # The outer script receives remote.sh.
 ssh host 'bash -s' < remote.sh
 
@@ -62,23 +75,40 @@ For quoted heredocs, Python snippets, regexes, or nested SSH, create the script
 as literal text and pass values as `bash -s --` arguments. Avoid deeply nested
 `ssh "sudo bash -lc '...'"` strings.
 
+For an exact multi-line script from PowerShell, write UTF-8 without BOM using
+`[IO.File]::WriteAllText($path, $script, [Text.UTF8Encoding]::new($false))`,
+upload it with `scp.exe` to a unique remote temporary path, run it with
+`ssh.exe`, and remove it only after recording the exit status. This avoids
+PowerShell pipeline serialization changing the script bytes.
+
 ## Encoding And Transfer Checks
 
 - Normalize CRLF before a Linux shell parses the script. A trailing `\r` can
   break heredoc terminators and produce misleading missing-file errors.
 - Do not pipe a PowerShell string directly to a native SSH decoder when exact
-  bytes matter; native pipelines can serialize records with CRLF. Use the
-  `ssh-skill` upload helper or a verified temporary file.
-- In PowerShell, resolve `ssh-skill` helpers from `$env:USERPROFILE` or another
-  verified absolute local path. Do not pass a quoted `~/.codex/...` path to a
-  native executable and assume PowerShell will expand it. Windows local paths
-  may use backslashes; remote Linux paths should use forward slashes.
-- Prefer resumable transfer for large files. Verify the destination with a
-  machine-derived SHA-256, never a hand-transcribed value:
+  bytes matter; native pipelines can serialize text records. Transfer a
+  verified file instead.
+- Resolve local files to absolute Windows paths before calling `scp.exe` or
+  `sftp.exe`. Windows local paths may use backslashes; remote Linux paths should
+  use forward slashes. Quote local paths as single argv elements.
+- `scp.exe` is not resumable. For large or unstable transfers, use a verified
+  resumable client available in the environment, such as WSL `rsync` with
+  `--partial --append-verify` or OpenSSH `sftp` with `reput`. Do not claim
+  resume support until the selected tool and behavior have been checked.
+- Verify the destination with a machine-derived SHA-256, never a hand-written
+  value. Restrict inline remote paths to a conservative safe character set; use
+  a remote script for paths requiring shell quoting:
 
 ```powershell
+$sshPath = (Get-Command ssh.exe -ErrorAction Stop).Source
 $expected = (Get-FileHash -LiteralPath $localPath -Algorithm SHA256).Hash.ToLowerInvariant()
-# Ask the remote helper for sha256sum and compare its parsed hash to $expected.
+if ($remotePath -notmatch '\A/[A-Za-z0-9._/-]+\z') {
+    throw "Remote path requires explicit shell quoting: $remotePath"
+}
+$hashOutput = @(& $sshPath -o BatchMode=yes $hostAlias "sha256sum -- $remotePath")
+if ($LASTEXITCODE -ne 0) { throw "Remote hash failed: $LASTEXITCODE" }
+$actual = (($hashOutput -join "`n") -split '\s+', 2)[0].ToLowerInvariant()
+if ($actual -ne $expected) { throw 'Remote SHA-256 mismatch' }
 ```
 
 - A checksum file should contain the target filename, not the source machine's
@@ -87,8 +117,8 @@ $expected = (Get-FileHash -LiteralPath $localPath -Algorithm SHA256).Hash.ToLowe
   checksum, permissions, and the artifact's intended location. Establish the
   expected owner/mode before declaring success.
 - If a resumed upload has the wrong size or hash, do not keep appending or
-  overwrite the target implicitly. Preserve the evidence, obtain authorization
-  to replace it, upload to a fresh temporary destination, verify it, and only
+  overwrite the target implicitly. Preserve the evidence, confirm replacement
+  is authorized, upload to a fresh temporary destination, verify it, and only
   then switch it into place.
 
 ## Layer Checklist

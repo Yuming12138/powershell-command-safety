@@ -195,9 +195,10 @@ printf '%s\n' "$release"
   command; PowerShell expands them first.
 - Do not use Bash redirection syntax such as `<<< $value` in PowerShell.
 - If the task involves SSH, server access, uploads, downloads, tunnels, or
-  remote commands, follow the installed `ssh-skill`; do not issue raw `ssh` or
-  `scp` when that skill is available. Resolve its helper scripts to absolute
-  local paths before invoking them from PowerShell. Read
+  remote commands, discover the installed client first and invoke the intended
+  executable explicitly (`ssh.exe`, `scp.exe`, or `sftp.exe` on Windows). Use
+  configured host aliases, preserve normal host-key verification, check every
+  native exit code, and verify the remote result independently. Read
   [references/wsl-ssh.md](references/wsl-ssh.md) for shell-boundary patterns
   and transfer verification.
 

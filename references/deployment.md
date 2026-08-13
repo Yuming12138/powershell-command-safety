@@ -1,7 +1,8 @@
 # Deployment Reference
 
 Read this reference only for release, service, container, or remote deployment
-work. Pair it with `ssh-skill` for all server operations.
+work. For remote operations, use the explicit OpenSSH executable and also
+follow the WSL and SSH reference linked directly from `SKILL.md`.
 
 ## Preflight
 
