@@ -43,6 +43,7 @@ When updating this skill from GitHub, first verify whether the active skill dire
 - Windows npm/npx shims and Node CLIs that spawn package-manager commands can misparse working directories containing shell metacharacters such as `&`. If a project must remain in such a path, run the tool through a persistent junction or other alias whose path contains no shell metacharacters; keep the source files at their original location.
 - `wsl.exe` command forwarding can also lose quoting around Linux paths derived from Windows directories containing `&`. For syntax checks or other stdin-capable commands, stream normalized file contents to WSL (for example, `Get-Content -Raw ... | wsl -- sh -n -`) instead of passing the metacharacter-containing path. For commands that require a path, copy to a verified short temporary path or run entirely within a safely quoted WSL script.
 - When combining values that may be a scalar or an array, force array shape on both sides before using `+`. PowerShell treats scalar strings as strings, so `$domains + 'api.example.com'` can become one concatenated hostname instead of two items; use `@($domains) + @('api.example.com')` or assign the full explicit array.
+- Native commands can return multi-line output as a PowerShell array. Before applying whole-document regex checks, join or cast the output to one string; `$lines -notmatch 'needle'` returns every nonmatching line and can be truthy even when another line matches. Use `$text = $lines -join "`n"; if ($text -notmatch 'needle') { ... }`.
 - Avoid PowerShell double-quoted strings around bash/ssh scripts containing `$var`, `$(...)`, backticks, or `\`.
 - Use single quotes for literal strings; use double quotes only when PowerShell interpolation is intended.
 - PowerShell does not use backslash as a general quote escape. Do not write Bash-style `\"` inside a double-quoted PowerShell string to protect regex or native-command arguments; use a single-quoted literal instead, or a PowerShell backtick only when interpolation is genuinely required. Example: `$pattern = 'create\("std|create\("sol'`.
@@ -50,9 +51,16 @@ When updating this skill from GitHub, first verify whether the active skill dire
 - Do not nest a PowerShell here-string inside another here-string that uses the same quote style and terminator. The inner terminator closes the outer string during parsing; build the inner content from a string array joined with `[Environment]::NewLine`, or use a safely different representation.
 - Never compose destructive file operations by enumerating in PowerShell and deleting in `cmd /c`, bash, or another shell.
 - Avoid variable names that collide with built-in variables. PowerShell variable names are case-insensitive, so `$home` collides with read-only `$HOME`, `$matches` collides with automatic `$Matches`, and `$Args` collides with automatic `$args`. Use names such as `$ArgList`, `$Rows`, or `$ResultItems` for function parameters and local collections.
-- Do not pipe directly from a `foreach (...) { ... }` statement block; it can fail with `An empty pipe element is not allowed.` Collect results in an array or use pipeline-native `ForEach-Object` when the output needs to be piped.
+- Do not pipe directly from a `foreach (...) { ... }` statement block; it can fail with `An empty pipe element is not allowed.` Before running multi-line PowerShell, check that no closing `}` from a `foreach` block is immediately followed by `|`. Collect first, then pipe: `$rows = foreach ($item in $items) { ... }; $rows | Format-Table`. Alternatively, use pipeline-native `$items | ForEach-Object { ... } | Format-Table`.
 - Do not separate multiple command invocations with commas inside `@(...)`. A comma is an expression/array operator, not a command separator, and can be parsed as an unexpected argument. Use `foreach` or save each command result before combining the values.
 - A wrapper that joins argv into one string and executes with `shell: true` destroys the argument boundaries created by a PowerShell array. Inspect wrapper scripts before relying on arrays; if they use patterns such as `commandParts.join(" ")`, include target-shell quotes around values containing spaces (for example, an `Authorization: Bearer ...` header), or prefer a wrapper that uses `spawn`/`execFile` with an argv array. Keep complex JSON and formatting strings out of the rejoined command when possible.
+- Under `Set-StrictMode`, a pipeline that produces no objects assigns `$null`, so reading a property such as `$stats.Sum` throws. Wrap potentially empty output in an array and branch on its count before accessing properties: `$results = @(Get-ChildItem ... | Measure-Object Length -Sum); $sum = if ($results.Count) { $results[0].Sum } else { 0 }`.
+
+Unsafe:
+
+```powershell
+foreach ($item in $items) { [pscustomobject]@{ Name = $item.Name } } | Format-Table
+```
 
 Safe examples:
 
@@ -256,12 +264,23 @@ $script | wsl -d Ubuntu-24.04 -- bash -lc 'cat > /tmp/task.sh && bash /tmp/task.
 
 ## SSH And Remote Scripts
 
+PowerShell does not support Bash here-strings such as `<<< $value`; it parses
+`<<<` as invalid redirection. If an SSH operation needs both a remote script
+and data, stream the script on stdin and pass the data as a safely encoded
+argument (for example Base64), or create a verified temporary file.
+
 Do not pipe a Base64 string produced by PowerShell directly into `ssh host 'base64 -d'`. The native pipeline can transcode or decorate text before SSH receives it, causing remote `base64: invalid input`. For small payloads, pass the Base64 text as a quoted SSH command argument and decode from remote `printf`; for larger files, use `rsync` or `scp` with checksum verification instead.
 
 ```powershell
 $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($text))
 & ssh cmsg-root "printf '%s' '$encoded' | base64 -d > /tmp/payload.txt"
 ```
+
+Also note that piping a PowerShell string to a native executable can serialize
+records with CRLF even after CR characters were removed from the in-memory
+string. For Linux scripts sent to `ssh host 'bash -s'`, normalize on the Linux
+side with `tr -d '\r'`, or ensure a harmless final comment absorbs a possible
+trailing CR and verify the remote result independently.
 
 For complex remote scripts, prefer:
 
